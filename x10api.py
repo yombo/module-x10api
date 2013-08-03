@@ -34,9 +34,8 @@ Implements
 - class X10Cmd - A class to pass between X10API module and interface modules.
 - class X10API - the command module 
 
-@author: Mitch Schwenk <mitch@yombo.net>
-@license: GPL(v3)
-@organization: Yombo
+:author: Mitch Schwenk <mitch-gw@yombo.net>
+:license: GPL(v3)
 
 """
 import time
@@ -58,7 +57,7 @@ class X10Cmd:
         """
         Setup the class to communicate between x10 API module and any interface modules.
         
-        @param x10api: A pointer to the x10api class.
+        :param x10api: A pointer to the x10api class.
         """
 #        self.callAfterChange = [] #is this needed?
 #        self.callBeforeChange = []
@@ -85,7 +84,7 @@ class X10Cmd:
         """@ivar: The updated state of the device. This is set by the interface module.
            @type: C{str} or C{int}"""
         self.chain = {}  # AKA history
-        self.created = time.time()
+        self.created = int(time.time())
         self.interfaceResult = None
         self.commandResult = None
         self.x10api = x10api
