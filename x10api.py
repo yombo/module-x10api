@@ -45,7 +45,7 @@ from yombo.core.helpers import getComponent, getInterfaceModule
 from yombo.core.log import getLogger
 from yombo.core.module import YomboModule
 
-logger = getLogger()
+logger = getLogger("moduls.x10api")
 
 class X10Cmd:
     """
@@ -87,8 +87,8 @@ class X10Cmd:
         self.commandResult = None
         self.x10api = x10api
         self.originalMessage = message
-        self.deviceobj = None
-        
+        self.deviceobj = message.payload['deviceobj']
+
     def dump(self):
         """
         Convert key class contents to a dictionary.
@@ -117,12 +117,10 @@ class X10Cmd:
        
     def done(self):
         """
-        Every command should tell the sender when the command was sent.
+        Called by the interface module once the command has been completed.
         
-        We just need to validate that it was sent, some protocols are
-        only one way.  This way the user gets some feedback.
-        
-        In this case, X10 may not work, but at the command was issued.
+        Note: the interface module will call the X10api module when a device
+        has a status change.  This is a different process then a command.
         """
         self.x10api.cmdDone(self)
         self.x10api.removeX10Cmd(self)
@@ -134,7 +132,6 @@ class X10Cmd:
         second.
         """
         reply = self.originalMessage.getReply(msgStatus='processing', msgStatusExtra="interface module processing request")
-        self.x10api.removeX10Cmd(self)
         reply.send()
     
     def failed(self, statusmsg):
@@ -223,8 +220,16 @@ class X10API(YomboModule):
           'jmtHRMTHn3LwvzeTU2pZrTQk' : "x10Appliance",
           'aSepfx4y5Pfav4XSi5MYujhi' : "x10Lamp",
           'fcA4d0WZHiyGJkdmQ8PwfJ7e' : "HouseCode",
-          }        
-           
+          }
+
+        self.x10devices = {} # used to lookup house/unit to a device
+        for devkey, device in self._LocalDevices.iteritems():
+            house = device.deviceVariables['housecode'][0].upper()
+            unit = int(device.deviceVariables['unitnumber'][0])
+            if house not in self.x10devices:
+              self.x10devices[house] = {}
+            self.x10devices[house][unit] = device
+
     def load(self):
         self.interfaceModule = getComponent(getInterfaceModule(self))
     
@@ -240,21 +245,19 @@ class X10API(YomboModule):
     def message(self, message):
 #        logger.debug("X10 got message: %s", message.dump())
         if message.msgType == 'cmd' and message.msgStatus == 'new':
-            device = message['payload']['deviceobj']
-            if self.devices[deviceuuid].devicetypeUUID in self.deviceTypes:
-#                try:
+            if message.payload['deviceobj'].deviceUUID in self._LocalDevices:
+                try:
                   self.processNewCmdMsg(message)
-#                except:
-#                    logger.info("")
+                except:
+                    logger.info("X10 message caught something.")
 
     def processNewCmdMsg(self, message):
         logger.debug("msg: %s", message.dump())
 
         x10cmd = X10Cmd(self, message)
-        x10cmd.deviceobj = message['payload']['deviceobj']
 
         housecode = x10cmd.deviceobj.deviceVariables['housecode'][0].upper()
-        if bool(re.match('[A-P]', )) == False:
+        if bool(re.match('[A-P]', housecode)) == False:
             raise ModuleWarning("Device dosn't have a valid house number.", 100, self)
 
         unitnumber = x10cmd.deviceobj.deviceVariables['unitnumber'][0]
@@ -287,17 +290,47 @@ class X10API(YomboModule):
 
         self.interfaceModule.sendX10Cmd(x10cmd)
 
-    def statusReceived(self, x10cmd):
+    def statusUpdate(self, house, unit, command, status=None):
         """
-        Used to deliver device state changes. A lamp turns on, etc.
-
-        Since the majority of the status' generated are actually X10 controllers, these
-        are actually commands. The value of payload will be the final state value of
-        the X10 device.
-
-        Two messages will be generated: a "new" command message and a status message.
+        Called by interface modules when a device has a change of status.
         """
-        pass
+        unit = int(unit)
+        if house in self.x10devices and unit in self.x10devices[house]:
+          device =  self.x10devices[house][unit]
+          newstatus = None
+          tempcmd = command.upper()
+
+          if device.deviceTypeUUID == "jmtHRMTHn3LwvzeTU2pZrTQk": # appliance
+            if tempcmd == 'ON':
+              newstatus = 'ON'
+            elif tempcmd == 'OFF':
+              newstatus = 'OFF'
+          elif device.deviceTypeUUID == "aSepfx4y5Pfav4XSi5MYujhi": # basic lamp
+            if tempcmd == 'ON':
+              newstatus = 100
+            elif tempcmd == 'OFF':
+              newstatus = 0
+            elif tempcmd == 'DIM':
+              if type(device.status[0]['status']) is int:
+                  newstatus = device.status[0]['status'] - 12
+              else:
+                  newstatus = 88
+            elif tempcmd == 'BRIGHT':
+              if type(device.status[0]['status']) is int:
+                  newstatus = device.status[0]['status'] + 12
+              else:
+                  newstatus = 100
+
+            if type(newstatus) is int:
+              if newstatus > 100:
+                  newstatus = 100
+              elif newstatus < 0:
+                  newstatus = 0
+            else:
+                newstatus = 0
+
+          logger.info("status update... %s" % newstatus)
+          device.setStatus(status=newstatus, source="x10api")
 
     def cmdDone(self, x10cmd):
         """
@@ -306,33 +339,6 @@ class X10API(YomboModule):
         First update the device status value, then sent a cmdreply msg.
         Finally, send a status message.
         """
-        tempcmd = x10cmd.x10command
-        deviceUUID = x10cmd.deviceobj.deviceUUID
-        newstatus = None
-#@todo: Move to interface module!!!
-        if tempcmd == 'ON':
-            newstatus = 100
-        elif tempcmd == 'OFF':
-            newstatus = 'OFF'
-        elif tempcmd == 'DIM':
-            if type(x10cmd.deviceobj.status[0]['status']) is int:
-                newstatus = x10cmd.deviceobj.status[0]['status'] - 12
-            else:
-                newstatus = 88
-        elif tempcmd == 'BRIGHT':
-            if type(x10cmd.deviceobj.status[0]['status']) is int:
-                newstatus = x10cmd.deviceobj.status[0]['status'] + 12
-            else:
-                newstatus = 100
-            
-        if type(newstatus) is int:
-            if newstatus > 100:
-                newstatus = 100
-            elif newstatus < 0:
-                newstatus = 0
-                
-        x10cmd.deviceobj.setStatus(status=newstatus, source="x10api")
-
         replmsg = x10cmd.originalMessage.getReply(status='done', statusExtra="Command completed.")
         logger.info("msgreply: %s", replmsg.dump())
         replmsg.send()
