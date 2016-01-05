@@ -39,20 +39,22 @@ Implements
 """
 import time
 import re
+import sys
+import traceback
 
-from yombo.core.exceptions import ModuleWarning
+from yombo.core.exceptions import YomboModuleWarning
 from yombo.core.helpers import getComponent, getInterfaceModule
 from yombo.core.log import getLogger
 from yombo.core.module import YomboModule
 
-logger = getLogger("moduls.x10api")
+logger = getLogger("modules.x10api")
 
 class X10Cmd:
     """
     An x10 command instance that is passed between this module
     and any interface modules to send X10 commands to the power line.
     """
-    def __init__(self, x10api, message):
+    def __init__(self, apimodule, message):
         """
         Setup the class to communicate between x10 API module and any interface modules.
         
@@ -60,6 +62,13 @@ class X10Cmd:
         """
 #        self.callAfterChange = [] #is this needed?
 #        self.callBeforeChange = []
+        self.deviceobj = message.payload['deviceobj']
+        """@ivar: The device itself
+           @type: C{YomboDevice}"""
+        self.cmdobj = message.payload['cmdobj']
+        """@ivar: The command itself
+           @type: C{YomboDevice}"""
+        self.deviceClass = "x10"
 
         self.x10house = None
         """@ivar: Information regarding the house letter. "value" will be the house letter. x10string and x10hex
@@ -73,21 +82,20 @@ class X10Cmd:
         """@ivar: Information regarding the command. "origcmd" is the original command. "value" is the offical
              x10 command, and x10hex is the offical x10 hex command code.
            @type: C{dict}"""
-        self.x10uuid = message.msgUUID
+        self.msguuid = message.msgUUID
         """@ivar: The msgID that was generated to create this command. Is None if comming from interface module.
            @type: C{str}"""
-        self.x10extended = None
+        self.extended = None
         """@ivar: Extended data to send with the x10 command.
            @type: C{hex}"""
-        self.x10status = None
+        self.deviceState = None
         """@ivar: The updated state of the device. This is set by the interface module.
            @type: C{str} or C{int}"""
         self.created = time.time()
         self.interfaceResult = None
         self.commandResult = None
-        self.x10api = x10api
+        self.apimodule = apimodule
         self.originalMessage = message
-        self.deviceobj = message.payload['deviceobj']
 
     def dump(self):
         """
@@ -107,7 +115,7 @@ class X10Cmd:
         """
         Send to the x10 command module
         """
-        self.x10api.interfaceModule.sendX10Cmd(self)
+        self.apimodule.interfaceModule.sendX10Cmd(self)
         
     def statusReceived(self, status, statusExtended={}):
         """
@@ -122,8 +130,10 @@ class X10Cmd:
         Note: the interface module will call the X10api module when a device
         has a status change.  This is a different process then a command.
         """
-        self.x10api.cmdDone(self)
-        self.x10api.removeX10Cmd(self)
+        replymsg = self.originalMessage.getReply(msgStatus='done', statusExtra="Command completed.")
+        logger.info("msgreply: {replymsg}", replymsg=replymsg.dump())
+        replymsg.send()
+        self.apimodule.removeX10Cmd(self)
 
     def pending(self):
         """
@@ -141,7 +151,7 @@ class X10Cmd:
         statusmsg should hold the failure reason.  Displayed to user.
         """
         reply = self.originalMessage.getReply(msgStatus='failed', msgStatusExtra="interface module failed to process request")
-        self.x10api.removeX10Cmd(self)
+        self.apimodule.removeX10Cmd(self)
         reply.send()
 
 class X10API(YomboModule):
@@ -149,12 +159,11 @@ class X10API(YomboModule):
     X10 Command Module
     
     Generic module that handles all x10 commands from other modules an
-    prepares it for an interface module.  Also recieves data from
+    prepares it for an interface module.  Also receives data from
     interface modules for delivery to other gateway modules.
     """
-#    zope.interface.implements(IModule)
 
-    def init(self):
+    def _init_(self):
         self._ModDescription = "X10 Command Module"
         self._ModAuthor = "Mitch Schwenk @ Yombo"
         self._ModUrl = "http://www.yombo.net"
@@ -215,65 +224,92 @@ class X10API(YomboModule):
           'STATUS_ON'     : 0x0D,
           'STATUS_OFF'    : 0x0E,
           'STATUS_REQUEST': 0x0F }
-        
-        self.deviceTypes = {
-          'jmtHRMTHn3LwvzeTU2pZrTQk' : "x10Appliance",
-          'aSepfx4y5Pfav4XSi5MYujhi' : "x10Lamp",
-          'fcA4d0WZHiyGJkdmQ8PwfJ7e' : "HouseCode",
-          }
 
         self.x10devices = {} # used to lookup house/unit to a device
-        for devkey, device in self._LocalDevices.iteritems():
-            house = device.deviceVariables['housecode'][0].upper()
-            unit = int(device.deviceVariables['unitnumber'][0])
-            if house not in self.x10devices:
-              self.x10devices[house] = {}
-            self.x10devices[house][unit] = device
 
-    def load(self):
-        self.interfaceModule = getComponent(getInterfaceModule(self))
-    
-    def start(self):
+    def _load_(self):
+        try:
+            interfaceModule = self._DeviceTypes.itervalues().next()  # Just get any deviceType as they all are routed to the same interface module
+            self.interfaceModule = self._ModulesLibrary.getDeviceRouting(interfaceModule[0]['devicetypeuuid'], 'Interface', 'module')
+            self.interfaceSupport = True
+            self._reload_()
+        except:
+            # no X10API module!
+            logger.warn("Insteon API - No Insteon interface module found, disabling Insteon support.")
+            self.interfaceSupport = False
+        logger.debug("X10 API - Interface module: {x10interface}", x10interface=self.interfaceModule)
+
+    def _reload_(self):
+        if self.interfaceSupport:
+            self.x10devices.clear()
+            for devkey, device in self._Devices.iteritems():
+                logger.info("devicevariables: {vars}", vars=device.deviceVariables)
+                house = device.deviceVariables['house']['value'][0].upper()
+                unit = int(device.deviceVariables['unitnumber']['value'][0])
+                if house not in self.x10devices:
+                  self.x10devices[house] = {}
+                self.x10devices[house][unit] = device
+                item = "%s%s" % (house, str(unit))
+                self.x10devices[item] = device
+
+    def _start_(self):
         pass
         
-    def stop(self):
+    def _stop_(self):
         pass
 
-    def unload(self):
+    def _unload_(self):
+        pass
+
+    #todo
+    def _UpdateDeviceTypes_(self, oldDeviceType, newDeviceType):
         pass
 
     def message(self, message):
-#        logger.debug("X10 got message: %s", message.dump())
+        """
+        Receives a message from the Yombo Framework.
+        :param message: A Yombo Framework Message
+        :return: None
+        """
         if message.msgType == 'cmd' and message.msgStatus == 'new':
-            if message.payload['deviceobj'].deviceUUID in self._LocalDevices:
+            logger.warn("bb {deviceTypes}", deviceTypes=message.payload['deviceobj'])
+            if message.payload['deviceobj'].deviceTypeUUID in self._DeviceTypes:
                 try:
-                  self.processNewCmdMsg(message)
+                    self.processNewCmdMsg(message)
                 except:
-                    logger.info("X10 message caught something.")
+                    logger.error("1:: {e}", e=sys.exc_info())
+                    logger.error("---------------==(Traceback)==--------------------------")
+                    logger.error("{e}", e=traceback.print_exc(file=sys.stdout))
+                    logger.error("--------------------------------------------------------")
 
     def processNewCmdMsg(self, message):
-        logger.debug("msg: %s", message.dump())
+        """
+        Sent from message to process an X10 command.
+        :param message:
+        :return:
+        """
+        logger.debug("in x10api::processNewCmdMsg")
 
         x10cmd = X10Cmd(self, message)
 
-        housecode = x10cmd.deviceobj.deviceVariables['housecode'][0].upper()
-        if bool(re.match('[A-P]', housecode)) == False:
-            raise ModuleWarning("Device dosn't have a valid house number.", 100, self)
+        house = x10cmd.deviceobj.deviceVariables['house']['value'][0].upper()
+        if bool(re.match('[A-P]', house)) == False:
+            raise YomboModuleWarning("Device dosn't have a valid house number.", 100, self)
 
-        unitnumber = x10cmd.deviceobj.deviceVariables['unitnumber'][0]
+        unitnumber = x10cmd.deviceobj.deviceVariables['unitnumber']['value'][0]
         try:
             unitnumber = int(unitnumber)
             if unitnumber < 1 or unitnumber > 16:
-              raise ModuleWarning("Device dosn't have a valid unit number.", 101, self)
+              raise YomboModuleWarning("Device dosn't have a valid unit number.", 101, self)
         except:
-              raise ModuleWarning("Device dosn't have a valid unit number.", 101, self)
+              raise YomboModuleWarning("Device dosn't have a valid unit number.", 101, self)
 
-        logger.info("House address: item %s - %s  'HU'" % (housecode, unitnumber))        
+        logger.info("House address: item {house} - {unitnumber} 'HU'", house=house, unitnumber=unitnumber)
 
         x10cmd.x10house = { 
-          "value"    : housecode,
-          "x10string": self.houseToX10[housecode]['string'],
-          "x10hex"   : self.houseToX10[housecode]['hex'] }
+          "value"    : house,
+          "x10string": self.houseToX10[house]['string'],
+          "x10hex"   : self.houseToX10[house]['hex'] }
           
         x10cmd.x10number = { 
           "value"    : unitnumber,
@@ -286,77 +322,67 @@ class X10API(YomboModule):
           "x10hex"     : self.functionToX10[message['payload']['cmdobj'].cmd.upper()]}
 
         self.x10cmds[message.msgUUID] = x10cmd
-        logger.debug("NEW: x10cmd: %s", x10cmd.dump())
+        logger.debug("NEW: x10cmd: {x10cmd}", x10cmd=x10cmd.dump())
 
+#        x10cmd.deviceobj.getRouting('interface')
+#        self._ModulesLibrary.getDeviceRouting(x10cmd.deviceobj.deviceTypeUUID, 'Interface')
         self.interfaceModule.sendX10Cmd(x10cmd)
 
-    def statusUpdate(self, house, unit, command, status=None):
+    def statusUpdate(self, house, unit, command, status=None, deviceObj=None):
         """
         Called by interface modules when a device has a change of status.
         """
+        logger.warn("x10api - status update: {house}{unit}:{command}", house=house, unit=unit, command=command)
         unit = int(unit)
-        if house in self.x10devices and unit in self.x10devices[house]:
-          device =  self.x10devices[house][unit]
-          newstatus = None
-          tempcmd = command.upper()
+        if deviceObj is None:
+            if house in self.x10devices and unit in self.x10devices[house]:
+              deviceObj =  self.x10devices[house][unit]
 
-          if device.deviceTypeUUID == "jmtHRMTHn3LwvzeTU2pZrTQk": # appliance
+        newstatus = None
+        tempcmd = command.upper()
+
+#        self._DevicesByType('x10_appliance')
+        logger.warn("self._DevicesByType('x10_appliance'): {dt}", dt=self._DevicesByType('x10_appliance'))
+        logger.warn("deviceObj.deviceTypeLabel: {dt}", dt=deviceObj.deviceTypeLabel)
+        if deviceObj.deviceTypeLabel == 'x10_appliance':
+            logger.warn("in x10 appliance")
             if tempcmd == 'ON':
-              newstatus = 'ON'
+                newstatus = 'ON'
             elif tempcmd == 'OFF':
-              newstatus = 'OFF'
-          elif device.deviceTypeUUID == "aSepfx4y5Pfav4XSi5MYujhi": # basic lamp
+                newstatus = 'OFF'
+        elif deviceObj.deviceTypeLabel == 'x10_lamp': # basic lamp
+            logger.warn("in x10 lamp")
             if tempcmd == 'ON':
-              newstatus = 100
+                newstatus = 100
             elif tempcmd == 'OFF':
-              newstatus = 0
+                newstatus = 0
             elif tempcmd == 'DIM':
-              if type(device.status[0]['status']) is int:
-                  newstatus = device.status[0]['status'] - 12
-              else:
-                  newstatus = 88
+                if type(deviceObj.status[0]['status']) is int:
+                    newstatus = deviceObj.status[0]['status'] - 12
+                else:
+                    newstatus = 88
             elif tempcmd == 'BRIGHT':
-              if type(device.status[0]['status']) is int:
-                  newstatus = device.status[0]['status'] + 12
-              else:
-                  newstatus = 100
+                if type(deviceObj.status[0]['status']) is int:
+                    newstatus = deviceObj.status[0]['status'] + 12
+                else:
+                    newstatus = 100
 
             if type(newstatus) is int:
-              if newstatus > 100:
-                  newstatus = 100
-              elif newstatus < 0:
-                  newstatus = 0
+                if newstatus > 100:
+                    newstatus = 100
+                elif newstatus < 0:
+                    newstatus = 0
             else:
                 newstatus = 0
 
-          logger.info("status update... %s" % newstatus)
-          device.setStatus(status=newstatus, source="x10api")
-
-    def cmdDone(self, x10cmd):
-        """
-        Called after interface module reports the command was sent out.
-        
-        First update the device status value, then sent a cmdreply msg.
-        Finally, send a status message.
-        """
-        replmsg = x10cmd.originalMessage.getReply(status='done', statusExtra="Command completed.")
-        logger.info("msgreply: %s", replmsg.dump())
-        replmsg.send()
-
-    def cmdFailed(self, x10cmd, statusmsg="Unknown reason."):
-        """
-        Used to tell the sending module that the command has failed.
-        
-        statusmsg should contain the status messsage to display to user
-        or enter on a log file.
-        """
-        pass
+        logger.info("status update... {newstatus}", newstatus=newstatus)
+        deviceObj.setStatus(status=newstatus, source="x10api")
     
     def removeX10Cmd(self, x10cmd):
         """
         Delete an old x10cmd object
         """
-        logger.debug("Purging x10cmd object: %s", x10cmd.x10uuid)
-        del self.x10cmds[x10cmd.x10uuid]
-        logger.debug("pending x10cmds: %s", self.x10cmds)
+        logger.debug("Purging x10cmd object: {x10cmd}", x10cmd=x10cmd.x10uuid)
+        del self.x10cmds[x10cmd.msguuid]
+        logger.debug("pending x10cmds: {x10cmds}", x10cmds=self.x10cmds)
 
