@@ -1,0 +1,27 @@
+# X10 API module
+# Mitch Schwenk <mitch@yombo.net>, 2016.
+
+#. TRANSLATORS: When a command is pending completion, this message is displayed.
+msgctxt "module.x10api"
+msgid "Waiting on X10 interface."
+msgstr ""
+
+#. TRANSLATORS: When a command is being processed by a module.
+msgctxt "module.x10api"
+msgid "Handled by X10API module."
+msgstr ""
+
+#. TRANSLATORS: When a submodule (an interface module) is unable to process the request.
+msgctxt "module.x10api"
+msgid "Interface module failed to process the request."
+msgstr ""
+
+#. TRANSLATORS: An x10 house is letters A-P. An error message saying the letter is invalid.
+msgctxt "module.x10api"
+msgid "Device dosn't have a valid house code."
+msgstr ""
+
+#. TRANSLATORS: Like house letter, it's a number between 1-16. An error messaging the number is invalid.
+msgctxt "module.x10api"
+msgid "Device dosn't have a valid unit number."
+msgstr ""
