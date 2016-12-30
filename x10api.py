@@ -233,6 +233,7 @@ class X10API(YomboModule):
 
         self.device_types = self._GetDeviceTypes()
         self.x10_devices = {} # used to lookup house/unit to a device
+        self.interface_found = False
 
     def _load_(self):
         """
@@ -259,22 +260,26 @@ class X10API(YomboModule):
         if len(interfaces) == 0:
             logger.warn("X10 API - No X10 Interface module found, disabling X10 support.")
         else:
+            self.interface_found = True
             key = interfaces.keys()[-1]
             self.interface_callback = temp[key]['callback']  # we can only have one interface, highest priority wins!!
         logger.warn("X10 interface: {interface}", interface=self.interface_callback)
 
         if self.interface_callback is not None:
             self.x10_devices.clear()
-            print "x10api init1!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!114"
             devices = self._GetDevices()
+            print "x10api init1!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!114"
             print "x10api devices: %s" % devices
             for device_id in devices:
-                device = self._Devices[device_id]
-                print "devkey: %s, device: %s"  % (device_id, device.label)
-                print "device variables in x10api: %s" % device.device_variables
-                logger.debug("devicevariables: {vars}", vars=device.device_variables)
-                house = device.device_variables['house'][0]['value'].upper()
-                unit = int(device.device_variables['unitnumber'][0]['value'])
+                try:
+                    device = self._Devices[device_id]
+                    # print "devkey: %s, device: %s"  % (device_id, device.label)
+                    # print "device variables in x10api: %s" % device.device_variables
+                    logger.info("devicevariables: {vars}", vars=device.device_variables)
+                    house = device.device_variables['house']['data'][0]['value'].upper()
+                    unit = int(device.device_variables['unit_code']['data'][0]['value'])
+                except:
+                    continue
                 if house not in self.x10_devices:
                   self.x10_devices[house] = {}
                 self.x10_devices[house][unit] = device
@@ -303,6 +308,11 @@ class X10API(YomboModule):
         logger.info("X10 API received device_command: {kwargs}", kwargs=kwargs)
         device = kwargs['device']
         request_id = kwargs['request_id']
+        if self.interface_found is False:
+            logger.info("X10 API received a command, but has no interfaces to send to. Try enabling an X10 interface module.")
+            device.device_command_failed(request_id, message=_('module.x10api', 'X10 API received a command, but has no interfaces to send to. Try enabling an X10 interface module.'))
+            return
+
         device.device_command_received(request_id, message=_('module.x10api', 'Handled by X10API module.'))
         command = kwargs['command']
 
@@ -317,11 +327,12 @@ class X10API(YomboModule):
 
         x10cmd = X10Cmd(self, request_id, device, command)
 
-        house = x10cmd.deviceobj.device_variables['house'][0]['value'].upper()
+        print "device vars: %s" % x10cmd.deviceobj.device_variables
+        house = x10cmd.deviceobj.device_variables['house']['data'][0]['value'].upper()
         if bool(re.match('[A-P]', house)) == False:
             raise YomboModuleWarning(_('module.x10api', "Device dosn't have a valid house code."), 100, self)
 
-        unitnumber = x10cmd.deviceobj.device_variables['unitnumber'][0]['value']
+        unitnumber = x10cmd.deviceobj.device_variables['unit_code']['data'][0]['value']
         try:
             unitnumber = int(unitnumber)
             if unitnumber < 1 or unitnumber > 16:
@@ -371,14 +382,14 @@ class X10API(YomboModule):
                 YomboWarning("X10 API received a status update, but no device object to reference it.")
 
         newstatus = None
+        humanstatus = None
         tempcmd = command.upper()
 
 #        self._DevicesByType('x10_appliance')
-        print ""
         device_type = self._DeviceTypes[deviceObj.device_type_id]
         logger.debug("self._DevicesByType('x10_appliance'): {dt}", dt=self._DeviceTypes.devices_by_device_type('x10_appliance'))
         logger.debug("device_type: {dt}", dt=device_type.label)
-        if device_type.label == 'x10_appliance':
+        if device_type.machine_label == 'x10_appliance':
             logger.debug("in x10 appliance")
             if tempcmd == 'ON':
                 newstatus = 1
@@ -386,7 +397,7 @@ class X10API(YomboModule):
             elif tempcmd == 'OFF':
                 newstatus = 0
                 humanstatus = 'Off'
-        elif device_type.label == 'x10_lamp': # basic lamp
+        elif device_type.machine_label == 'x10_lamp': # basic lamp
             logger.debug("in x10 lamp")
             if tempcmd == 'ON':
                 newstatus = 1
@@ -418,7 +429,7 @@ class X10API(YomboModule):
                 newstatus = 0
                 humanstatus = 'Off'
 
-#        logger.debug("status update... {newstatus}", newstatus=newstatus)
+        logger.debug("status update.  Machine: {newstatus}   Human: {humanstatus}", newstatus=newstatus, humanstatus=humanstatus)
 
         deviceObj.set_status(machine_status=newstatus, human_status=humanstatus, source="x10api")
     
