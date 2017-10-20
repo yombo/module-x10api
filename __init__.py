@@ -1,1 +1,1 @@
-from x10api import X10API
+from .x10api import X10API
