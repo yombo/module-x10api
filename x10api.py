@@ -268,14 +268,13 @@ class X10API(YomboModule):
             self.x10_devices.clear()
             # print "x10api init1!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!114"
             # print "x10api devices: %s" % devices
-            for device_id, device in self._ModuleDevices().items():
+            module_devices = yield self._module_devices()
+            for device_id, device in module_devices.items():
                 try:
                     device = self._Devices[device_id]
-                    # print "devkey: %s, device: %s"  % (device_id, device.label)
-                    # print "device variables in x10api: %s" % device.device_variables
-                    # logger.debug("devicevariables: {vars}", vars=device.device_variables)
-                    house = device.device_variables['house']['values'][0].upper()
-                    unit = int(device.device_variables['unit_code']['values'][0])
+                    # logger.debug("devicevariables: {vars}", vars=device.device_variables_cached)
+                    house = device.device_variables_cached['house']['values'][0].upper()
+                    unit = int(device.device_variables_cached['unit_code']['values'][0])
                 except:
                     continue
                 if house not in self.x10_devices:
@@ -310,11 +309,7 @@ class X10API(YomboModule):
             device.device_command_failed(request_id, message=_('module.x10api', 'X10 API received a command, but has no interfaces to send to. Try enabling an X10 interface module.'))
             return
 
-        # logger.debug("Testing if _device_command_ has '{device_type_id}' in here: {device_types}",
-        #         device_type_id=device.device_type_id, device_types=self._device_types)
-        if device.device_type_id not in self._device_types:
-            # logger.debug("Skipping _device_command_ call since '{device_type_id}' not in here: {device_types}",
-            #         device_type_id=device.device_type_id, device_types=self._device_types)
+        if device.device_type_id not in self._module_device_types_cached:
             return  # not meant for us.
 
         device.device_command_received(request_id, message=_('module.x10api', 'Handled by X10API module.'))
@@ -323,12 +318,12 @@ class X10API(YomboModule):
 
         x10cmd = X10Cmd(self, request_id, device, command)
 
-        # print("device vars: %s" % x10cmd.deviceobj.device_variables)
-        house = x10cmd.deviceobj.device_variables['house']['values'][0].upper()
+        # print("device vars: %s" % x10cmd.deviceobj.device_variables_cached)
+        house = x10cmd.deviceobj.device_variables_cached['house']['values'][0].upper()
         if bool(re.match('[A-P]', house)) == False:
             raise YomboModuleWarning(_('module.x10api', "Device dosn't have a valid house code."), 100, self)
 
-        unitnumber = x10cmd.deviceobj.device_variables['unit_code']['values'][0]
+        unitnumber = x10cmd.deviceobj.device_variables_cached['unit_code']['values'][0]
         try:
             unitnumber = int(unitnumber)
             if unitnumber < 1 or unitnumber > 16:
